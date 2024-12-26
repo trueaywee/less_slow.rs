@@ -5,7 +5,8 @@ edition = "2021"
 
 [dependencies]
 criterion = "0.5" # For benchmarking
-futures = "0.3"   # If you want to do async/await streams instead
+async-stream = "0.3" # Pseudo-coroutines downloaded over 80 M times
+futures = "0.3"  
 
 [profile.release]
 opt-level = 3     # Corresponds to -O3

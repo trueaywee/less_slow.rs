@@ -235,7 +235,7 @@ fn pipeline_virtual() -> (u64, u64) {
 
 // endregion: Polymorphism
 
-// region: Coroutines
+// region: Experimental Coroutines
 
 /// A generator that produces integers in the range [start..=end].
 fn for_range_coroutine(start: u64, end: u64) -> impl Coroutine<Yield = u64, Return = ()> {
@@ -309,9 +309,77 @@ fn pipeline_coroutines() -> (u64, u64) {
     (sum, count)
 }
 
-// endregion: Coroutines
+// endregion: Experimental Coroutines
 
-// endregion: Pipelines and Abstractions
+// region: Streams or Pseudo-Coroutines
+
+use async_stream::stream;
+use futures::{Stream, StreamExt};
+
+/// Produces a stream of integers in the range `[start, end]`.
+fn for_range_stream(start: u64, end: u64) -> impl Stream<Item = u64> {
+    stream! {
+        for value in start..=end {
+            yield value;
+        }
+    }
+}
+
+/// Filters a stream of integers by a given predicate.
+fn filter_stream<S>(input: S, predicate: fn(u64) -> bool) -> impl Stream<Item = u64>
+where
+    S: Stream<Item = u64> + Unpin,
+{
+    input.filter(move |&value| futures::future::ready(!predicate(value)))
+}
+
+/// Lazily generates the prime factors of numbers in the input stream.
+fn prime_factors_stream<S>(input: S) -> impl Stream<Item = u64>
+where
+    S: Stream<Item = u64> + Unpin,
+{
+    stream! {
+        let mut input = Box::pin(input);
+        while let Some(value) = input.next().await {
+            let mut number = value;
+            let mut factor = 2;
+
+            while number > 1 {
+                if number % factor == 0 {
+                    yield factor;
+                    number /= factor;
+                } else {
+                    factor += if factor == 2 { 1 } else { 2 };
+                }
+            }
+        }
+    }
+}
+
+/// Coroutine-based pipeline.
+fn pipeline_streams() -> (u64, u64) {
+    let range_stream = Box::pin(for_range_stream(PIPE_START, PIPE_END));
+    let filtered_stream = Box::pin(filter_stream(
+        filter_stream(range_stream, is_power_of_two),
+        is_power_of_three,
+    ));
+    let factor_stream = prime_factors_stream(filtered_stream);
+
+    let mut sum = 0;
+    let mut count = 0;
+
+    futures::executor::block_on(async {
+        let mut factor_stream = Box::pin(factor_stream);
+        while let Some(factor) = factor_stream.next().await {
+            sum += factor;
+            count += 1;
+        }
+    });
+
+    (sum, count)
+}
+
+// endregion: Streams or Pseudo-Coroutines
 
 pub fn benchmark_closures(c: &mut Criterion) {
     c.bench_function("pipeline_closures", |b| {
@@ -343,6 +411,16 @@ pub fn benchmark_virtual(c: &mut Criterion) {
     });
 }
 
+pub fn benchmark_streams(c: &mut Criterion) {
+    c.bench_function("pipeline_streams", |b| {
+        b.iter(|| {
+            let (sum, count) = pipeline_streams();
+            black_box(sum);
+            black_box(count);
+        })
+    });
+}
+
 pub fn benchmark_coroutines(c: &mut Criterion) {
     c.bench_function("pipeline_coroutines", |b| {
         b.iter(|| {
@@ -353,6 +431,21 @@ pub fn benchmark_coroutines(c: &mut Criterion) {
     });
 }
 
+//? The benchmarks show that the closures and iterators are the fastest,
+//? with the virtual pipeline being expectedly slower due to dynamic dispatch.
+//?
+//?     - `pipeline_closures`: __226__ ns
+//?     - `pipeline_iterators`: __229__ ns
+//?     - `pipeline_virtual`: __888__ ns
+//?     - `pipeline_streams`: __955__ ns
+//?     - `pipeline_coroutines`: __358__ ns
+//?
+//? The results are comparable with C++ benchmarks, with Rust coroutines looking
+//? better than C++ coroutines. Also, as expected, native experimental coroutines
+//? are faster than Tokio streams - upgrade when you can!
+
+// endregion: Pipelines and Abstractions
+
 // Group them into a benchmark suite.
 criterion_group!(
     name = benchmarks;
@@ -362,6 +455,7 @@ criterion_group!(
         benchmark_iterators,
         benchmark_virtual,
         benchmark_coroutines,
+        benchmark_streams,
 );
 
 criterion_main!(benchmarks);
