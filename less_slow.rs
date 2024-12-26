@@ -1,71 +1,76 @@
+//! # Less Slow
+//!
+//! ## Low-level microbenchmarks for building a performance-first mindset
+//!
+//! This module provides microbenchmarks to build a performance-first mindset.
+//! Focus is on tradeoffs of abstractions, covering costs of numerical operations,
+//! micro-kernels, parallelism, and more.
+//!
+//! Key principles are written in Rust but apply universally, and have been reproduced
+//! in other languages:
+//!
+//! - [C++ Benchmarks](https://github.com/ashvardanian/less_slow.cpp)
+//! - [Python Benchmarks](https://github.com/ashvardanian/less_slow.py)
+//! - [Go Benchmarks](https://github.com/ashvardanian/less_slow.go)
+//!
 #![allow(dead_code)]
 #![allow(unused_imports)]
+#![feature(coroutines)] // Called `generator` before.
+#![feature(coroutine_trait)]
+#![feature(stmt_expr_attributes)]
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use std::cmp;
 use std::iter;
 use std::ops::RangeInclusive;
+use std::ops::{Coroutine, CoroutineState};
+use std::pin::Pin;
+
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
+
+// region: Pipelines and Abstractions
+
+//? Designing efficient micro-kernels is hard, but composing them into
+//? high-level pipelines without losing performance is just as difficult.
+//?
+//? Consider a hypothetical numeric processing pipeline:
+//?
+//?    1. Generate all integers in a given range (e.g., [1, 49]).
+//?    2. Filter out integers that are perfect squares.
+//?    3. Expand each remaining number into its prime factors.
+//?    4. Sum all prime factors from the filtered numbers.
+//?
+//? We'll explore four implementations of this pipeline:
+//?
+//?   - **Callback-based Pipeline** using closures,
+//?   - **Iterator-based Pipeline** using a custom `PrimeFactors` iterator,
+//?   - **Coroutine/Generator-based Pipeline** using the [`async-stream`] crate,
+//?   - **Trait Objects** ("virtual" functions in C++-speak) to compose stages dynamically.
 
 /// For demonstration, we'll replicate the pipeline on [3..=49].
 const PIPE_START: u64 = 3;
 const PIPE_END: u64 = 49;
 
-// ---------------------------------------------------------
-//  Utility functions: is_power_of_two, is_power_of_three, prime_factors
-// ---------------------------------------------------------
-
+/// Checks if an integer is a power of two.
 #[inline(always)]
 fn is_power_of_two(x: u64) -> bool {
-    // A number is a power of two if x & (x - 1) == 0, for x != 0
     x != 0 && (x & (x - 1)) == 0
 }
 
+/// Checks if an integer is a power of three.
 #[inline(always)]
 fn is_power_of_three(x: u64) -> bool {
-    // The largest power of three in 64-bit is 3^40 = 12157665459056928801
     const MAX_POWER_OF_THREE: u64 = 12157665459056928801;
     x > 0 && (MAX_POWER_OF_THREE % x == 0)
 }
 
-#[inline(always)]
-fn prime_factors(mut number: u64) -> Vec<u64> {
-    let mut factors = Vec::new();
+// region: Closures
 
-    // Factor out powers of 2
-    while number % 2 == 0 && number > 0 {
-        factors.push(2);
-        number /= 2;
-    }
-
-    // Factor out odd numbers
-    let mut factor = 3;
-    while factor * factor <= number {
-        while number % factor == 0 {
-            factors.push(factor);
-            number /= factor;
-        }
-        factor += 2;
-    }
-
-    // If leftover, it's a prime
-    if number > 1 {
-        factors.push(number);
-    }
-
-    factors
-}
-
-// ---------------------------------------------------------
-//  1) Pipeline using closures
-// ---------------------------------------------------------
-
-/// Finds prime factors of a number and applies the callback for each factor.
-fn prime_factors_callback<F>(mut number: u64, mut callback: F)
+/// Factorizes `number` into primes, invoking `callback` for each factor.
+fn prime_factors_closure<F>(mut number: u64, mut callback: F)
 where
     F: FnMut(u64),
 {
-    let mut factor = 2;
-
+    let mut factor: u64 = 2;
     while number > 1 {
         if number % factor == 0 {
             callback(factor);
@@ -76,32 +81,34 @@ where
     }
 }
 
+/// Callback-based pipeline.
 fn pipeline_closures() -> (u64, u64) {
-    let mut sum = 0u64;
-    let mut count = 0u64;
+    let mut sum = 0;
+    let mut count = 0;
 
     for value in PIPE_START..=PIPE_END {
         if !is_power_of_two(value) && !is_power_of_three(value) {
-            prime_factors_callback(value, |factor| {
+            prime_factors_closure(value, |factor| {
                 sum += factor;
                 count += 1;
             });
         }
     }
-
     (sum, count)
 }
-// ---------------------------------------------------------
-//  3) Pipeline using Iterators (Ranges)
-// ---------------------------------------------------------
 
-/// Lazily evaluates the prime factors of a number.
+// endregion: Closures
+
+// region: Iterators
+
+/// Lazily evaluates the prime factors of a single integer.
 struct PrimeFactors {
     number: u64,
     factor: u64,
 }
 
 impl PrimeFactors {
+    /// Creates a new `PrimeFactors` iterator from `number`.
     fn new(number: u64) -> Self {
         PrimeFactors { number, factor: 2 }
     }
@@ -126,22 +133,24 @@ impl Iterator for PrimeFactors {
     }
 }
 
+/// Iterator-based pipeline.
 fn pipeline_iterators() -> (u64, u64) {
     (PIPE_START..=PIPE_END)
         .filter(|&v| !is_power_of_two(v) && !is_power_of_three(v))
-        .flat_map(|v| PrimeFactors::new(v)) // Use the lazy iterator
-        .fold((0, 0), |(sum, count), f| (sum + f, count + 1))
+        .flat_map(|v| PrimeFactors::new(v)) // Use our lazy iterator
+        .fold((0, 0), |(sum, count), factor| (sum + factor, count + 1))
 }
 
-// ---------------------------------------------------------
-//  4) Polymorphism: trait objects akin to virtual classes
-// ---------------------------------------------------------
+// endregion: Iterators
 
+// region: Polymorphism
+
+/// A trait that processes a vector of data as a pipeline stage.
 trait PipelineStage {
     fn process(&self, data: &mut Vec<u64>);
 }
 
-/// A stage that pushes [start..=end] into `data`.
+/// A stage that pushes `[start..=end]` into `data`, clearing it first.
 struct ForRangeVirtual {
     start: u64,
     end: u64,
@@ -155,7 +164,7 @@ impl PipelineStage for ForRangeVirtual {
     }
 }
 
-/// A stage that filters out elements according to a function predicate.
+/// A stage that filters out elements according to a function `predicate`.
 struct FilterVirtual {
     predicate: fn(u64) -> bool,
 }
@@ -165,30 +174,34 @@ impl PipelineStage for FilterVirtual {
     }
 }
 
-/// A stage that expands numbers into their prime factors.
+/// A stage that expands numbers into their prime factors, pushing them into `data`.
+///
+/// Uses `prime_factors_closure` to avoid building an intermediate `Vec<u64>`.
 struct PrimeFactorsVirtual;
 impl PipelineStage for PrimeFactorsVirtual {
     fn process(&self, data: &mut Vec<u64>) {
         let mut expanded = Vec::new();
         for &value in data.iter() {
-            expanded.extend(prime_factors(value));
+            prime_factors_closure(value, |f| expanded.push(f));
         }
         *data = expanded;
     }
 }
 
-/// A pipeline that holds multiple stages as trait objects (like `virtual` in C++).
+/// A pipeline that holds multiple stages as trait objects (akin to a "homogeneous virtual pipeline" in C++).
 struct HomogeneousVirtualPipeline {
     stages: Vec<Box<dyn PipelineStage>>,
 }
+
 impl HomogeneousVirtualPipeline {
     fn new() -> Self {
-        HomogeneousVirtualPipeline { stages: Vec::new() }
+        Self { stages: Vec::new() }
     }
     fn add_stage(&mut self, stage: Box<dyn PipelineStage>) {
         self.stages.push(stage);
     }
 }
+
 impl PipelineStage for HomogeneousVirtualPipeline {
     fn process(&self, data: &mut Vec<u64>) {
         for stage in &self.stages {
@@ -197,6 +210,7 @@ impl PipelineStage for HomogeneousVirtualPipeline {
     }
 }
 
+/// Trait-object-based pipeline.
 fn pipeline_virtual() -> (u64, u64) {
     let mut pipeline = HomogeneousVirtualPipeline::new();
     pipeline.add_stage(Box::new(ForRangeVirtual {
@@ -219,9 +233,85 @@ fn pipeline_virtual() -> (u64, u64) {
     (sum, count)
 }
 
-// ---------------------------------------------------------
-//  Criterion Benchmarks
-// ---------------------------------------------------------
+// endregion: Polymorphism
+
+// region: Coroutines
+
+/// A generator that produces integers in the range [start..=end].
+fn for_range_coroutine(start: u64, end: u64) -> impl Coroutine<Yield = u64, Return = ()> {
+    #[coroutine]
+    move || {
+        for value in start..=end {
+            yield value;
+        }
+    }
+}
+
+/// A generator that filters values from the input generator based on a predicate.
+fn filter_coroutine<G>(
+    input: G,
+    predicate: fn(u64) -> bool,
+) -> impl Coroutine<Yield = u64, Return = ()>
+where
+    G: Coroutine<Yield = u64, Return = ()> + Unpin,
+{
+    #[coroutine]
+    move || {
+        let mut input = input;
+        while let CoroutineState::Yielded(value) = Pin::new(&mut input).resume(()) {
+            if !predicate(value) {
+                yield value;
+            }
+        }
+    }
+}
+
+/// A generator that expands values into their prime factors.
+fn prime_factors_coroutine<G>(input: G) -> impl Coroutine<Yield = u64, Return = ()>
+where
+    G: Coroutine<Yield = u64, Return = ()> + Unpin,
+{
+    #[coroutine]
+    move || {
+        let mut input = input;
+        while let CoroutineState::Yielded(mut number) = Pin::new(&mut input).resume(()) {
+            let mut factor: u64 = 2;
+            while number > 1 {
+                if number % factor == 0 {
+                    yield factor;
+                    number /= factor;
+                } else {
+                    factor += if factor == 2 { 1 } else { 2 };
+                }
+            }
+        }
+    }
+}
+
+/// Coroutine-based pipeline.
+fn pipeline_coroutines() -> (u64, u64) {
+    let range_gen = for_range_coroutine(PIPE_START, PIPE_END);
+    let filtered_gen = filter_coroutine(
+        filter_coroutine(range_gen, is_power_of_two),
+        is_power_of_three,
+    );
+    let factor_gen = prime_factors_coroutine(filtered_gen);
+
+    let mut sum: u64 = 0;
+    let mut count: u64 = 0;
+    let mut generator = factor_gen;
+
+    while let CoroutineState::Yielded(factor) = Pin::new(&mut generator).resume(()) {
+        sum += factor;
+        count += 1;
+    }
+
+    (sum, count)
+}
+
+// endregion: Coroutines
+
+// endregion: Pipelines and Abstractions
 
 pub fn benchmark_closures(c: &mut Criterion) {
     c.bench_function("pipeline_closures", |b| {
@@ -253,7 +343,17 @@ pub fn benchmark_virtual(c: &mut Criterion) {
     });
 }
 
-// The group needs a trailing comma after each target:
+pub fn benchmark_coroutines(c: &mut Criterion) {
+    c.bench_function("pipeline_coroutines", |b| {
+        b.iter(|| {
+            let (sum, count) = pipeline_coroutines();
+            black_box(sum);
+            black_box(count);
+        })
+    });
+}
+
+// Group them into a benchmark suite.
 criterion_group!(
     name = benchmarks;
     config = Criterion::default();
@@ -261,6 +361,7 @@ criterion_group!(
         benchmark_closures,
         benchmark_iterators,
         benchmark_virtual,
+        benchmark_coroutines,
 );
 
 criterion_main!(benchmarks);
