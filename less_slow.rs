@@ -41,10 +41,11 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 //?
 //? We'll explore four implementations of this pipeline:
 //?
-//?   - **Callback-based Pipeline** using closures,
-//?   - **Iterator-based Pipeline** using a custom `PrimeFactors` iterator,
-//?   - **Coroutine/Generator-based Pipeline** using the [`async-stream`] crate,
-//?   - **Trait Objects** ("virtual" functions in C++-speak) to compose stages dynamically.
+//?   - __Callback-based Pipeline__ using closures,
+//?   - __Range-based Pipeline__ using a custom `PrimeFactors` iterator,
+//?   - __Trait Objects__ (`virtual`` functions in C++-speak) to compose stages dynamically.
+//?   - __Experimental Coroutines-based Pipeline__ with `#[coroutine]` macros,
+//?   - __Legacy Async Streams__ using the [`async-stream`] crate,
 
 /// For demonstration, we'll replicate the pipeline on [3..=49].
 const PIPE_START: u64 = 3;
@@ -381,54 +382,25 @@ fn pipeline_streams() -> (u64, u64) {
 
 // endregion: Streams or Pseudo-Coroutines
 
-pub fn benchmark_closures(c: &mut Criterion) {
-    c.bench_function("pipeline_closures", |b| {
-        b.iter(|| {
-            let (sum, count) = pipeline_closures();
-            black_box(sum);
-            black_box(count);
-        })
-    });
-}
+pub fn benchmark_pipelines(c: &mut Criterion) {
+    fn run_pipeline<F>(name: &str, pipeline_fn: F, c: &mut Criterion)
+    where
+        F: Fn() -> (u64, u64),
+    {
+        c.bench_function(name, |b| {
+            b.iter(|| {
+                let (sum, count) = pipeline_fn();
+                black_box(sum);
+                black_box(count);
+            });
+        });
+    }
 
-pub fn benchmark_iterators(c: &mut Criterion) {
-    c.bench_function("pipeline_iterators", |b| {
-        b.iter(|| {
-            let (sum, count) = pipeline_iterators();
-            black_box(sum);
-            black_box(count);
-        })
-    });
-}
-
-pub fn benchmark_virtual(c: &mut Criterion) {
-    c.bench_function("pipeline_virtual", |b| {
-        b.iter(|| {
-            let (sum, count) = pipeline_virtual();
-            black_box(sum);
-            black_box(count);
-        })
-    });
-}
-
-pub fn benchmark_streams(c: &mut Criterion) {
-    c.bench_function("pipeline_streams", |b| {
-        b.iter(|| {
-            let (sum, count) = pipeline_streams();
-            black_box(sum);
-            black_box(count);
-        })
-    });
-}
-
-pub fn benchmark_coroutines(c: &mut Criterion) {
-    c.bench_function("pipeline_coroutines", |b| {
-        b.iter(|| {
-            let (sum, count) = pipeline_coroutines();
-            black_box(sum);
-            black_box(count);
-        })
-    });
+    run_pipeline("pipeline_closures", pipeline_closures, c);
+    run_pipeline("pipeline_iterators", pipeline_iterators, c);
+    run_pipeline("pipeline_virtual", pipeline_virtual, c);
+    run_pipeline("pipeline_streams", pipeline_streams, c);
+    run_pipeline("pipeline_coroutines", pipeline_coroutines, c);
 }
 
 //? The benchmarks show that the closures and iterators are the fastest,
@@ -446,16 +418,78 @@ pub fn benchmark_coroutines(c: &mut Criterion) {
 
 // endregion: Pipelines and Abstractions
 
+// region: Exceptions, Backups, Logging
+
+// region: Logs
+
+use chrono::{DateTime, Utc};
+use std::fmt::Write as FmtWrite;
+use std::panic::Location;
+
+/// Logs a message using `format!` with embedded timestamp formatting.
+fn log_format(buffer: &mut String, location: &Location, code: i32, message: &str) -> usize {
+    let now: DateTime<Utc> = Utc::now();
+    let formatted_time = now.format("%Y-%m-%dT%H:%M:%S%.3fZ");
+    let len = buffer.len();
+    write!(
+        buffer,
+        "{} | {}:{} <{:03}> \"{}\"\n",
+        formatted_time,
+        location.file(),
+        location.line(),
+        code,
+        message
+    )
+    .ok();
+    buffer.len() - len
+}
+
+pub fn benchmark_logs(c: &mut Criterion) {
+    fn run_log<F>(name: &str, log_fn: F, c: &mut Criterion)
+    where
+        F: Fn(&mut String, &Location, i32, &str) -> usize,
+    {
+        let mut buffer = String::with_capacity(1024);
+        let location = Location::caller();
+        let errors = vec![
+            (1, "Operation not permitted"),
+            (12, "Cannot allocate memory"),
+            (113, "No route to host"),
+        ];
+        let mut idx = 0;
+
+        c.bench_function(name, |b| {
+            b.iter(|| {
+                buffer.clear();
+                let (code, message) = errors[idx % 3];
+                idx += 1;
+                log_fn(&mut buffer, location, code, message);
+                black_box(&buffer);
+            });
+        });
+    }
+
+    run_log("log_format", log_format, c);
+}
+
+//? Logs in Rust with `write!` and `DelayedFormat` take __394__ ns,
+//? which is slower than the C-native `snprintf` and the `fmt::` library in C++.
+
+// endregion: Logs
+
+// endregion: Exceptions, Backups, Logging
+
 // Group them into a benchmark suite.
 criterion_group!(
-    name = benchmarks;
+    name = pipelines_benchmarks;
     config = Criterion::default();
-    targets =
-        benchmark_closures,
-        benchmark_iterators,
-        benchmark_virtual,
-        benchmark_coroutines,
-        benchmark_streams,
+    targets = benchmark_pipelines,
 );
 
-criterion_main!(benchmarks);
+criterion_group!(
+    name = logs_benchmarks;
+    config = Criterion::default();
+    targets = benchmark_logs,
+);
+
+criterion_main!(pipelines_benchmarks, logs_benchmarks);
