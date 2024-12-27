@@ -31,6 +31,8 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 // region: Numerics
 
+// region: Accuracy vs Efficiency of Standard Libraries
+
 //? Numerical computing is a core subject in high-performance computing (HPC)
 //? research and graduate studies, yet its foundational concepts are more
 //? accessible than they seem. Let's start with one of the most basic operations
@@ -137,8 +139,6 @@ pub fn benchmark_sine(c: &mut Criterion) {
 //?
 //? Overall, using the discouraged "fast math intrinsics" yielded a __5.4x__ speedup.
 
-// region: Accuracy vs Efficiency of Standard Libraries
-
 // endregion: Accuracy vs Efficiency of Standard Libraries
 
 // endregion: Numerics
@@ -159,9 +159,9 @@ pub fn benchmark_sine(c: &mut Criterion) {
 //?
 //?  - __Callback-based Pipeline__ using closures,
 //?  - __Range-based Pipeline__ using a custom `PrimeFactors` iterator,
-//?  - __Trait Objects__ (`virtual`` functions in C++-speak) to compose stages dynamically.
+//?  - __Trait Objects__ with type-punning to compose stages dynamically,
 //?  - __Experimental Coroutines-based Pipeline__ with `#[coroutine]` macros,
-//?  - __Legacy Async Streams__ using the [`async-stream`] crate,
+//?  - __Legacy Async Streams__ using the `async-stream` crate.
 
 /// For demonstration, we'll replicate the pipeline on [3..=49].
 const PIPE_START: u64 = 3;
@@ -305,7 +305,7 @@ impl PipelineStage for PrimeFactorsVirtual {
     }
 }
 
-/// A pipeline that holds multiple stages as trait objects (akin to a "homogeneous virtual pipeline" in C++).
+/// A pipeline that holds multiple stages as trait objects.
 struct HomogeneousVirtualPipeline {
     stages: Vec<Box<dyn PipelineStage>>,
 }
