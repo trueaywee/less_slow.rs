@@ -1,6 +1,7 @@
 # _Less Slow_ Rust
 
 > The spiritual little brother of [`less_slow.cpp`](https://github.com/ashvardanian/less_slow.cpp).
+> The benchmarks in this repository don't aim to cover every topic entirely, but they help form a mindset and intuition for performance-oriented software design.
 
 Much of modern code suffers from common pitfalls: bugs, security vulnerabilities, and performance bottlenecks. University curricula often teach outdated concepts, while bootcamps oversimplify crucial software development principles.
 
